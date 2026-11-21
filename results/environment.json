@@ -1,0 +1,15 @@
+{
+  "Python": "3.14.3",
+  "PyTorch": "2.15.0+cpu",
+  "NumPy": "2.4.4",
+  "pandas": "3.0.2",
+  "scikit-learn": "1.9.1",
+  "Matplotlib": "3.11.2",
+  "Streamlit": "1.65.0",
+  "Semilla": "42",
+  "Dispositivo": "CPU",
+  "Procesador": "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD",
+  "Sistema operativo": "Windows 11",
+  "Hilos CPU (torch)": "6",
+  "Comando": "python.exe experiments.py"
+}

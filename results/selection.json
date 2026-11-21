@@ -1,0 +1,14 @@
+{
+  "ID": "C6",
+  "L": 24,
+  "H": 64,
+  "num_layers": 1,
+  "n_params": 4801,
+  "train_time_sec": 44.87,
+  "best_epoch": 44,
+  "epochs_run": 50,
+  "val_mae": 33.28837161186238,
+  "val_rmse": 47.9484820168501,
+  "val_mase": 0.5986625037134692,
+  "criterio": "Menor MAE en validación; desempate por RMSE y luego por menos parámetros"
+}

@@ -16,15 +16,21 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 # 3. Instalar dependencias
 pip install -r requirements.txt
 
-# 4. Iniciar la aplicación
+# 4. (Parte 4) Entrenar la rejilla C1–C9 y evaluar una sola vez en prueba
+python experiments.py
+python evaluate.py
+
+# 5. Iniciar la aplicación
 streamlit run app.py
 ```
+
+`experiments.py` y `evaluate.py` se ejecutan **fuera de la app**; las pestañas 4 y 5 solo leen `results/`.
 
 ## Estructura del Proyecto
 
 | Archivo | Parte | Contenido |
 |---|---|---|
-| `app.py` | 1–3 | Interfaz interactiva de Streamlit con una pestaña por integrante (Partes 1, 2 y 3) |
+| `app.py` | 1–4 | Interfaz interactiva de Streamlit con una pestaña por integrante (Partes 1 a 4) |
 | `config.py` | 1 / 3 | Semilla fija (`SEED = 42`), rutas, particiones 70/15/15 y constantes de entrenamiento/rejilla |
 | `data.py` | 1 | Funciones de carga de `hour.csv` y compatibilidad de datos |
 | `metrics.py` | 1 | Métricas de evaluación (MAE, RMSE, MASE), fórmulas base y conteo analítico de parámetros RNN |
@@ -33,6 +39,9 @@ streamlit run app.py
 | `baselines.py` | 3 | Modelos de referencia causales en validación/prueba: persistencia, promedio estacional ($k$ días) y regresión Ridge sobre rezagos |
 | `model.py` | 3 | Arquitectura PyTorch `SimpleRNNForecaster` (1–2 capas `nn.RNN(tanh)` + cabeza lineal), tabla de capas y conteo exacto de parámetros |
 | `train.py` | 3 | Configuración `TrainConfig` (MSE, Adam, batch, clipping, early stopping, semilla), bucle reproducible `train_rnn(...)` y rejilla 3×3 (`C1`–`C9`) |
+| `experiments.py` | 4 | Entrena la rejilla 3×3 (C1–C9) con `train_rnn`, selecciona por menor MAE de validación y guarda modelos, historiales, predicciones de validación, entorno y configuración en `results/` |
+| `evaluate.py` | 4 | Evaluación única en prueba de la configuración elegida frente a los baselines, guarda `best_model.pt`, `scaler.json`, `test_predictions.csv`, `test_metrics.csv` y figuras; funciones de gráficos reutilizadas por la app |
+| `results/` | 4 | Artefactos generados (ver tabla siguiente) |
 | `data/hour.csv` | 1 | Dataset UCI Bike Sharing (ID 275) |
 | `assets/arquitectura_rnn.png` | 1 | Diagrama de la arquitectura RNN muchos a uno |
 
@@ -49,3 +58,23 @@ streamlit run app.py
   - Arquitectura concreta `SimpleRNNForecaster` en PyTorch con selector de $H \in \{16, 32, 64\}$, $L \in \{12, 24, 48\}$, 1–2 capas y verificación de parámetros entrenables.
   - Configuración de aprendizaje reproducible (MSE, Adam, `lr=0.001`, batch `64`, clipping `1.0`, early stopping y `SEED = 42`).
   - Plan de hiperparámetros con la rejilla 3×3 (`C1`–`C9`) listo para ser entrenado fuera de la app por la Parte 4 (`experiments.py`).
+- **Parte 4 (del 4.7 al 5.4):**
+  - Protocolo de validación por bloque temporal (sin mezcla aleatoria) y contexto solo pasado en las ventanas.
+  - Reproducibilidad: versiones de bibliotecas, semilla `42`, dispositivo y comandos (`results/environment.json`).
+  - Rejilla 3×3 entrenada: MAE, RMSE, MASE, parámetros, épocas y tiempo por configuración.
+  - Curvas de pérdida, selección de la configuración y evaluación única en prueba frente a los baselines.
+
+### Artefactos de `results/`
+
+| Archivo | Contenido |
+|---|---|
+| `grid_results.csv` | Métricas de validación, parámetros, épocas y tiempo de C1–C9 |
+| `histories.json` | Pérdida MSE de entrenamiento y validación por época |
+| `val_predictions.csv` | Predicciones de validación de las 9 configuraciones y de los baselines |
+| `selection.json` | Configuración elegida y criterio |
+| `models/C*.pt`, `best_model.pt` | Pesos (`state_dict`) y metadatos de cada configuración y del modelo final |
+| `scaler.json` | Mínimos/máximos del escalador ajustado solo en entrenamiento |
+| `test_predictions.csv` | Predicciones de prueba (RNN y baselines) con hora, calendario y clima, para la Parte 5 |
+| `test_metrics.csv` | MAE, RMSE, MASE y mejora vs. persistencia en prueba |
+| `environment.json`, `train_config.json` | Versiones, dispositivo y configuración de entrenamiento |
+| `figures/` | Figuras exportadas para el informe |

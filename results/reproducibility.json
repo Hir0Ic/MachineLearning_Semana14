@@ -1,0 +1,10 @@
+{
+  "ID": "C1",
+  "MAE grid": 34.940897948151125,
+  "MAE reentrenado": 34.940897948151125,
+  "RMSE grid": 51.10651946254514,
+  "RMSE reentrenado": 51.10651946254514,
+  "Mejor época grid": 34,
+  "Mejor época reentrenado": 34,
+  "Idéntico": true
+}

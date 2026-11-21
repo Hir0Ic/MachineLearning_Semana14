@@ -32,6 +32,7 @@ from model import (
 from preprocessing import (TemporalMinMaxScaler, create_sliding_windows,
                            split_dataframe, temporal_split_indices)
 from train import TrainConfig, build_hyperparameter_grid, training_config_table
+import evaluate as ev
 
 st.set_page_config(page_title="RNN · Bike Sharing", page_icon="🚲", layout="wide")
 set_seeds(SEED)
@@ -52,11 +53,12 @@ df, I_TR, I_VA = get_dataset()
 st.title("Pronóstico horario de alquiler de bicicletas con una RNN simple")
 st.caption("Sistemas Inteligentes y Machine Learning · UPN · Grupo 03")
 
-# Pestañas principales por integrante (Partes 1, 2 y 3)
+# Pestañas principales por integrante (Partes 1 a 4)
 tabs = st.tabs([
     "📘 PARTE 1: Problema, Fundamentos y Datos",
     "📊 PARTE 2: Entradas, EDA y Preprocesamiento",
     "🧠 PARTE 3: Baselines y Arquitectura RNN",
+    "🧪 PARTE 4: Experimentos y Resultados",
 ])
 
 # ====================================================================================
@@ -702,3 +704,381 @@ with tabs[2]:
         f"{I_VA - I_TR:,} horas de validación usando `train.py` con semilla `{SEED}`. Las columnas de tiempo, "
         "MAE val. y RMSE val. se completan en la ejecución experimental de la Parte 4 (`experiments.py`)."
     )
+
+
+# ====================================================================================
+# TAB 4: PARTE 4
+# ====================================================================================
+@st.cache_data
+def get_results(_stamp):
+    """Lee results/ (la clave `_stamp` cambia cuando se regeneran los archivos)."""
+    return ev.load_results()
+
+
+def _results_stamp():
+    files = list(ev.RESULTS_DIR.glob("*.csv")) + list(ev.RESULTS_DIR.glob("*.json"))
+    return tuple(sorted((f.name, f.stat().st_mtime) for f in files))
+
+
+def _show(fig):
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
+def _howto(what, how):
+    """Recuadro 'Cómo leer esta sección' para la exposición."""
+    st.info(f"**🔎 Qué muestra:** {what}\n\n**📖 Cómo leerlo:** {how}")
+
+
+def _key(msg):
+    st.success(f"**✅ Mensaje clave:** {msg}")
+
+
+with tabs[3]:
+    st.header("PARTE 4: Experimentos, Selección y Evaluación Final")
+
+    status = ev.results_available()
+    if not status["grid"]:
+        st.warning("Aún no existen resultados en `results/`. Ejecuta desde la carpeta del proyecto:")
+        st.code("python experiments.py\npython evaluate.py", language="bash")
+    else:
+        R = get_results(_results_stamp())
+        grid = R["grid"]
+        sel = R["selection"]
+        hist = R["histories"]
+        vp = R["val_predictions"]
+        bval = R["baselines_val"].set_index("Modelo")
+        tm = R["test_metrics"]
+        SEL = sel["ID"]
+        p_mae_val = bval.loc[ev.PERSIST, "MAE"]
+        rnn_test = tm[tm["Modelo"].str.startswith("RNN")].iloc[0] if tm is not None else None
+
+        # ------------------------------------------------------------ Recorrido en 4 pasos
+        st.markdown("##### El recorrido de esta parte en 4 pasos")
+        f1, f2, f3, f4 = st.columns(4)
+        with f1.container(border=True):
+            st.markdown("**① Cómo se valida**")
+            st.metric("Partición cronológica", "70 / 15 / 15")
+            st.caption("Sin mezclar el orden del tiempo: se entrena con el pasado y se evalúa con el futuro.")
+        with f2.container(border=True):
+            st.markdown("**② Qué se probó**")
+            st.metric("RNN entrenadas", f"{len(grid)} configuraciones")
+            st.caption(f"3 ventanas L × 3 tamaños H · {grid['Tiempo (s)'].sum() / 60:.1f} min en CPU.")
+        with f3.container(border=True):
+            st.markdown("**③ Cuál se eligió**")
+            st.metric("Mejor en validación", f"{SEL} · L={sel['L']}, H={sel['H']}")
+            st.caption(f"MAE = {sel['val_mae']:.1f} bicicletas/h, el menor de las {len(grid)}.")
+        with f4.container(border=True):
+            st.markdown("**④ Resultado final**")
+            if rnn_test is not None:
+                st.metric("MAE en prueba", f"{rnn_test['MAE']:.1f}",
+                          f"{-rnn_test['Mejora MAE vs. persistencia (%)']:.0f} % vs. persistencia",
+                          delta_color="inverse")
+                st.caption("Evaluado una sola vez sobre 2 607 h nunca vistas.")
+            else:
+                st.metric("MAE en prueba", "pendiente")
+                st.caption("Ejecuta `python evaluate.py`.")
+
+        sub = st.tabs([
+            "① Protocolo y reproducibilidad (4.7–4.8)",
+            "② Experimentos (5.1)",
+            "③ Curvas de pérdida (5.2)",
+            "④ Selección (5.3)",
+            "⑤ Prueba final (5.4)",
+        ])
+
+        # ---------------------------------------------------------------- 4.7 / 4.8
+        with sub[0]:
+            st.subheader("4.7 Protocolo de validación")
+            _howto("cómo se reparten los 2 años de datos y para qué se usa cada tramo.",
+                   "el tiempo avanza de izquierda a derecha. La red aprende con el bloque azul, se ajusta y "
+                   "elige con el naranja, y el rojo se abre una sola vez al final.")
+            _show(ev.fig_protocol())
+            c_a, c_b, c_c = st.columns(3)
+            with c_a.container(border=True):
+                st.markdown("**🔵 Entrenamiento**")
+                st.markdown(f"{I_TR:,} h · 2011-01 a 2012-05\n\nAjusta los pesos de la red y el escalador MinMax.")
+            with c_b.container(border=True):
+                st.markdown("**🟠 Validación**")
+                st.markdown(f"{I_VA - I_TR:,} h · 2012-05 a 2012-09\n\nDecide cuándo parar (early stopping) "
+                            "y qué configuración gana.")
+            with c_c.container(border=True):
+                st.markdown("**🔴 Prueba**")
+                st.markdown(f"{len(df) - I_VA:,} h · 2012-09 a 2012-12\n\nSe usa **una sola vez** con el "
+                            "modelo ya elegido.")
+
+            st.markdown("#### ¿Cómo se evita mirar el futuro?")
+            _howto("una muestra real de validación: la ventana que recibe la red y la hora que debe adivinar.",
+                   "mueve el control para recorrer muestras. En las primeras, parte de la ventana cae en "
+                   "entrenamiento: es pasado legítimo. La estrella (t+1) siempre queda a la derecha de la ventana.")
+            cv1, cv2 = st.columns([1, 3])
+            v_L = cv1.select_slider("Ventana L", WINDOW_SIZES, value=sel["L"], key="p4_vL")
+            v_j = cv2.slider("Muestra j de validación (0 = primera hora de validación)", 0, 240, 6, key="p4_vj")
+            _show(ev.fig_window_example(df, I_TR, v_L, v_j))
+            tgt = I_TR + v_j
+            st.caption(f"Ventana: {df.timestamp[tgt - v_L]:%Y-%m-%d %H:00} → {df.timestamp[tgt - 1]:%Y-%m-%d %H:00} "
+                       f"(t) · Objetivo: {df.timestamp[tgt]:%Y-%m-%d %H:00} (t+1) · "
+                       f"{max(0, v_L - v_j)} de {v_L} horas vienen del tramo de entrenamiento.")
+            with st.expander("Ver las 4 reglas anti-fuga aplicadas"):
+                st.markdown(
+                    "1. **Escalador** ajustado solo con entrenamiento; validación y prueba usan esos mismos límites.\n"
+                    "2. **Entrada ≤ t, objetivo = t+1:** ninguna variable de la hora a predecir entra en la ventana.\n"
+                    "3. **Contexto solo pasado:** las primeras ventanas de validación/prueba toman las últimas L "
+                    "horas del tramo anterior, nunca horas posteriores.\n"
+                    "4. **Barajado solo dentro de entrenamiento:** la red reinicia su memoria ($h_0 = 0$) en cada "
+                    "ventana, así que mezclar ventanas de entrenamiento no cruza información entre tramos."
+                )
+            _key("la validación es un bloque cronológico; la red nunca ve una hora posterior a la que "
+                 "pronostica y la prueba queda intacta hasta el final.")
+
+            st.divider()
+            st.subheader("4.8 Reproducibilidad")
+            env = R["environment"] or {}
+            rp = R["reproducibility"]
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("Semilla fija", f"SEED = {SEED}")
+            r2.metric("Dispositivo", env.get("Dispositivo", "CPU"))
+            r3.metric("PyTorch", env.get("PyTorch", "—"))
+            if rp:
+                r4.metric(f"Reentreno de {rp['ID']}", "✅ Idéntico" if rp["Idéntico"] else "⚠️ Difiere",
+                          f"MAE {rp['MAE grid']:.2f} → {rp['MAE reentrenado']:.2f}", delta_color="off")
+            else:
+                r4.metric("Reentreno de control", "—")
+            _key("con la misma semilla y versiones, volver a entrenar produce exactamente las mismas cifras.")
+            with st.expander("Ver versiones, configuración y comandos para reproducir"):
+                import importlib.metadata as _md
+
+                def _ver(pkg):
+                    try:
+                        return _md.version(pkg)
+                    except _md.PackageNotFoundError:
+                        return "—"
+
+                now = {"PyTorch": torch.__version__, "NumPy": np.__version__, "pandas": pd.__version__,
+                       "Matplotlib": _ver("matplotlib"), "Streamlit": _ver("streamlit")}
+                env_df = pd.DataFrame(
+                    [(k, v, now.get(k, "")) for k, v in env.items() if k != "Comando"],
+                    columns=["Elemento", "Valor en la ejecución de results/", "Versión en esta sesión"],
+                )
+                st.dataframe(env_df, hide_index=True, use_container_width=True)
+                st.json(R["train_config"], expanded=False)
+                st.code(
+                    "pip install -r requirements.txt\n"
+                    "python experiments.py   # entrena C1–C9, guarda results/ y verifica reproducibilidad\n"
+                    "python evaluate.py      # evaluación única en prueba + figuras\n"
+                    "streamlit run app.py",
+                    language="bash",
+                )
+
+        # ---------------------------------------------------------------- 5.1
+        with sub[1]:
+            st.subheader("5.1 Experimentos realizados")
+            _howto("el error de validación de las 9 RNN y de las 4 líneas base, ordenados de peor (arriba) a "
+                   "mejor (abajo).",
+                   "barras más cortas = menos error. El MAE dice cuántas bicicletas por hora se equivoca el "
+                   "modelo en promedio. Verde = RNN (★ la elegida); otros colores = líneas base.")
+            m_choice = st.radio("Métrica:", ["MAE", "RMSE"], horizontal=True, key="p4_rankmetric")
+            _show(ev.fig_model_ranking(grid, bval[["MAE", "RMSE"]], SEL, m_choice))
+            worst = grid.loc[grid["MAE val"].idxmax()]
+            _key(f"todas las RNN superan a todas las líneas base. Incluso la peor ({worst['ID']}, MAE "
+                 f"{worst['MAE val']:.1f}) se equivoca {(1 - worst['MAE val'] / p_mae_val) * 100:.0f} % menos que "
+                 f"la persistencia y {(1 - worst['MAE val'] / bval.loc[ev.RIDGE, 'MAE']) * 100:.0f} % menos que Ridge.")
+
+            st.markdown("#### ¿Qué combinación de L y H funciona mejor?")
+            _howto("cómo cambia el error al variar la historia (L) y el tamaño de la memoria (H).",
+                   "en el mapa, el color más claro es el mejor. En las líneas, cada color es un H; el punto "
+                   "más bajo indica la mejor ventana.")
+            cg1, cg2 = st.columns(2)
+            with cg1:
+                _show(ev.fig_grid_heatmap(grid, "MAE val", SEL))
+            with cg2:
+                _show(ev.fig_effects(grid))
+            mL = grid.groupby("Ventana L")["MAE val"].mean()
+            _key(f"la ventana de 24 h es la mejor (MAE medio {mL[24]:.1f} frente a {mL[12]:.1f} con 12 h y "
+                 f"{mL[48]:.1f} con 48 h): un día completo contiene el ciclo diario y 48 pasos ya cuestan a la "
+                 "RNN simple. Más neuronas (H) ayudan un poco.")
+
+            with st.expander("Ver tablas: plan de experimentos A–D y rejilla C1–C9 completa"):
+                d_rows = grid[grid["ID"].isin(["C5", "C6", "C8", "C9"])].sort_values("MAE val")
+                best_d = d_rows.iloc[0]
+                c1_row = grid[grid["ID"] == "C1"].iloc[0]
+                exp = pd.DataFrame([
+                    ("A", "Persistencia: último cnt", "Línea base",
+                     *bval.loc[ev.PERSIST, ["MAE", "RMSE", "MASE"]]),
+                    ("B", "Promedio misma hora, últimos 7 días", "Línea base estacional",
+                     *bval.loc[ev.SEASONAL, ["MAE", "RMSE", "MASE"]]),
+                    ("C", "RNN L = 12, H = 16 (C1)", "Memoria corta",
+                     c1_row["MAE val"], c1_row["RMSE val"], c1_row["MASE val"]),
+                    ("D", f"RNN L = 24/48, H = 32/64 (mejor: {best_d['ID']})", "Dependencias más largas",
+                     best_d["MAE val"], best_d["RMSE val"], best_d["MASE val"]),
+                    ("Ref.", "Ridge sobre rezagos", "Referencia lineal exigente",
+                     *bval.loc[ev.RIDGE, ["MAE", "RMSE", "MASE"]]),
+                ], columns=["Exp.", "Configuración", "Finalidad", "MAE", "RMSE", "MASE"])
+                st.dataframe(exp.style.format({"MAE": "{:.2f}", "RMSE": "{:.2f}", "MASE": "{:.3f}"}),
+                             hide_index=True, use_container_width=True)
+
+                def _hl(row):
+                    return ["background-color: #E3F1E8; font-weight: 600" if row["ID"] == SEL else "" for _ in row]
+
+                show_cols = ["ID", "Ventana L", "Hidden H", "Parámetros", "Tiempo (s)", "Épocas", "Mejor época",
+                             "MAE val", "RMSE val", "MASE val"]
+                st.dataframe(
+                    grid[show_cols].style.apply(_hl, axis=1).format(
+                        {"MAE val": "{:.2f}", "RMSE val": "{:.2f}", "MASE val": "{:.3f}", "Tiempo (s)": "{:.1f}",
+                         "Parámetros": "{:,}"}),
+                    hide_index=True, use_container_width=True,
+                )
+                st.caption("MASE < 1 = mejor que la persistencia de entrenamiento (MAE ingenuo = 55.60).")
+
+        # ---------------------------------------------------------------- 5.2
+        with sub[2]:
+            st.subheader("5.2 Curvas de pérdida y seguimiento")
+            _howto("cómo bajó el error de la red época a época, en los datos que ve (azul) y en datos nuevos "
+                   "(naranja).",
+                   "si ambas curvas bajan, la red aprende. Cuando la naranja deja de bajar, se detiene el "
+                   "entrenamiento (early stopping) y se guardan los pesos de la mejor época (línea verde).")
+            l1, l2 = st.columns([1, 3])
+            f_cfg = l1.selectbox("Configuración", grid["ID"].tolist(), index=grid["ID"].tolist().index(SEL),
+                                 key="p4_lossid")
+            r_cfg = grid[grid["ID"] == f_cfg].iloc[0]
+            with l2:
+                k1, k2, k3 = st.columns(3)
+                k1.metric("Épocas ejecutadas", int(r_cfg["Épocas"]))
+                k2.metric("Mejor época", int(r_cfg["Mejor época"]))
+                be = int(r_cfg["Mejor época"]) - 1
+                k3.metric("Brecha val/train", f"{hist[f_cfg]['val_loss'][be] / hist[f_cfg]['train_loss'][be]:.1f}×")
+            _show(ev.fig_loss_focus(hist[f_cfg], f_cfg, int(r_cfg["Mejor época"])))
+            _key("las curvas convergen sin explotar (el clipping funciona). La validación queda ≈ 2× sobre "
+                 "entrenamiento: parte es sobreajuste leve y parte el verano de 2012, con más demanda que lo "
+                 "visto al entrenar. Con L = 48 el early stopping llega antes y el error es mayor.")
+            with st.expander("Comparar las 9 configuraciones"):
+                _show(ev.fig_loss_grid(hist, grid, SEL))
+
+            st.markdown("#### ¿Cómo se ve el pronóstico en validación?")
+            _howto("una semana de validación: demanda real (negro) frente a la RNN y dos líneas base.",
+                   "la RNN (verde) se pega a la curva real. La persistencia (naranja) llega siempre una hora "
+                   "tarde y el promedio estacional (azul) falla cuando cambia el tipo de día.")
+            cf1, cf2, cf3 = st.columns([1, 1, 3])
+            f_id = cf1.selectbox("Configuración", grid["ID"].tolist(), index=grid["ID"].tolist().index(SEL),
+                                 key="p4_fid")
+            n_days = cf2.radio("Días", [3, 7], index=1, horizontal=True, key="p4_days")
+            f_s = cf3.slider("Inicio (hora relativa en validación)", 0, len(vp) - 168,
+                             ev.best_week_start(vp["timestamp"]), step=24, key="p4_fs")
+            w = slice(f_s, f_s + 24 * n_days)
+            _show(ev.fig_forecast(
+                vp["timestamp"].iloc[w], vp["y_true"].iloc[w].to_numpy(),
+                {f"RNN {f_id}": vp[f_id].iloc[w].to_numpy(),
+                 "A. Persistencia": vp["persistencia"].iloc[w].to_numpy(),
+                 "B. Promedio estacional (k=7)": vp["promedio_estacional"].iloc[w].to_numpy()},
+                f"Validación · {n_days} días desde {vp['timestamp'].iloc[f_s]:%Y-%m-%d}"))
+            yw = vp["y_true"].iloc[w].to_numpy()
+            k1, k2, k3 = st.columns(3)
+            k1.metric(f"MAE del tramo · RNN {f_id}", f"{mae(yw, vp[f_id].iloc[w]):.1f}")
+            k2.metric("MAE del tramo · Persistencia", f"{mae(yw, vp['persistencia'].iloc[w]):.1f}")
+            k3.metric("MAE del tramo · Prom. estacional", f"{mae(yw, vp['promedio_estacional'].iloc[w]):.1f}")
+
+        # ---------------------------------------------------------------- 5.3
+        with sub[3]:
+            st.subheader("5.3 Selección de configuración")
+            st.info(f"**📏 Regla de selección (fijada antes de ver resultados):** {sel['criterio']}. "
+                    "Solo se usa validación; la prueba no interviene.")
+            rk = grid.sort_values(["MAE val", "RMSE val", "Parámetros"]).reset_index(drop=True)
+            podium = st.columns(3)
+            for col, (i, r), medal in zip(podium, rk.head(3).iterrows(), ["🥇", "🥈", "🥉"]):
+                with col.container(border=True):
+                    st.markdown(f"### {medal} {r['ID']} · L={r['Ventana L']}, H={r['Hidden H']}")
+                    st.metric("MAE validación", f"{r['MAE val']:.2f}",
+                              None if i == 0 else f"+{r['MAE val'] - sel['val_mae']:.2f} vs. {SEL}",
+                              delta_color="inverse")
+                    st.caption(f"RMSE {r['RMSE val']:.2f} · {int(r['Parámetros']):,} parámetros · "
+                               f"{r['Tiempo (s)']:.0f} s")
+
+            cs1, cs2 = st.columns(2)
+            with cs1:
+                _howto("error frente a tamaño del modelo; el tamaño del punto es el tiempo de entrenamiento.",
+                       "lo ideal está abajo a la izquierda (poco error, pocos parámetros).")
+                _show(ev.fig_complexity(grid, SEL))
+            with cs2:
+                _howto(f"cuánto reduce {SEL} el error de cada línea base en validación.",
+                       "barra más larga = mayor ventaja de la RNN.")
+                _show(ev.fig_gain_bars(sel["val_mae"], {k: bval.loc[k, "MAE"] for k in
+                                                         [ev.PERSIST, ev.SEASONAL, ev.SEASONAL_1, ev.RIDGE]},
+                                       f"Ventaja de {SEL} en validación"))
+            second = rk.iloc[1]
+            _key(f"{SEL} tiene el menor MAE y también el menor RMSE, por eso se elige. {second['ID']} queda a "
+                 f"solo {second['MAE val'] - sel['val_mae']:.2f} bicicletas/h con menos parámetros: la ventaja es "
+                 "pequeña y con una sola semilla no puede asegurarse que sea significativa.")
+            with st.expander("Ver ranking completo"):
+                rk2 = rk.copy()
+                rk2.index = rk2.index + 1
+                rk2["Δ MAE vs. elegida"] = rk2["MAE val"] - sel["val_mae"]
+                st.dataframe(rk2[["ID", "Ventana L", "Hidden H", "Parámetros", "Tiempo (s)", "MAE val",
+                                  "RMSE val", "Δ MAE vs. elegida"]].style.format(
+                    {"MAE val": "{:.2f}", "RMSE val": "{:.2f}", "Δ MAE vs. elegida": "{:+.2f}",
+                     "Tiempo (s)": "{:.1f}"}), use_container_width=True)
+
+        # ---------------------------------------------------------------- 5.4
+        with sub[4]:
+            st.subheader("5.4 Evaluación final en el conjunto de prueba")
+            if not status["test"]:
+                st.warning("Falta la evaluación en prueba. Ejecuta `python evaluate.py`.")
+            else:
+                tp = R["test_predictions"]
+                b_row = tm[tm["Modelo"] == ev.SEASONAL].iloc[0]
+                r_row = tm[tm["Modelo"] == ev.RIDGE].iloc[0]
+                t1, t2, t3, t4 = st.columns(4)
+                t1.metric("MAE RNN en prueba", f"{rnn_test['MAE']:.1f}", f"val: {sel['val_mae']:.1f}",
+                          delta_color="off")
+                t2.metric("vs. Persistencia", f"−{rnn_test['Mejora MAE vs. persistencia (%)']:.0f} % de error")
+                t3.metric("vs. Promedio estacional", f"−{(1 - rnn_test['MAE'] / b_row['MAE']) * 100:.0f} % de error")
+                t4.metric("vs. Ridge", f"−{(1 - rnn_test['MAE'] / r_row['MAE']) * 100:.0f} % de error")
+
+                _howto("el error de cada modelo sobre 2 607 horas (sep–dic 2012) que nadie usó antes.",
+                       "barra más corta = mejor. Entre paréntesis, cuánto mejora o empeora cada modelo frente a "
+                       "la persistencia.")
+                _show(ev.fig_test_ranking(tm))
+                _key(f"la RNN mantiene en prueba el nivel de validación (MAE {sel['val_mae']:.1f} → "
+                     f"{rnn_test['MAE']:.1f}) y reduce el error de la persistencia en "
+                     f"{rnn_test['Mejora MAE vs. persistencia (%)']:.0f} %. No hay señal de que la selección haya "
+                     "sobreajustado la validación.")
+
+                st.markdown("#### Pronóstico vs. realidad")
+                _howto("cada punto es una hora de prueba: en el eje x la demanda real y en el y la pronosticada.",
+                       "si el pronóstico fuera perfecto, todos los puntos caerían en la diagonal. La nube de la RNN "
+                       "es mucho más estrecha que la de la persistencia.")
+                _show(ev.fig_real_vs_pred(tp))
+
+                _howto("una semana de prueba con la demanda real y los pronósticos.",
+                       "elige qué líneas base superponer y mueve la semana. Observa en qué horas falla cada modelo.")
+                ct1, ct2, ct3 = st.columns([2, 1, 3])
+                opts = {"A. Persistencia": "persistencia", "B. Promedio estacional (k=7)": "promedio_estacional",
+                        "B0. Día anterior (k=1)": "misma_hora_dia_anterior", "C. Ridge rezagos": "ridge"}
+                chosen = ct1.multiselect("Líneas base a superponer:", list(opts),
+                                         default=["A. Persistencia"], key="p4_tb")
+                t_days = ct2.radio("Días", [3, 7], index=1, horizontal=True, key="p4_tdays")
+                t_s = ct3.slider("Inicio (hora relativa en prueba)", 0, len(tp) - 168,
+                                 ev.best_week_start(tp["timestamp"]), step=24, key="p4_ts")
+                w = slice(t_s, t_s + 24 * t_days)
+                preds = {f"RNN {SEL}": tp["rnn"].iloc[w].to_numpy()}
+                preds.update({k: tp[opts[k]].iloc[w].to_numpy() for k in chosen})
+                _show(ev.fig_forecast(tp["timestamp"].iloc[w], tp["y_true"].iloc[w].to_numpy(), preds,
+                                      f"Prueba · {t_days} días desde {tp['timestamp'].iloc[t_s]:%Y-%m-%d}"))
+                st.caption("Tip: alrededor del 29-oct-2012 (huracán Sandy) la demanda cae casi a cero; "
+                           "el promedio estacional arrastra ese día atípico durante una semana.")
+
+                with st.expander("Ver tabla completa de prueba y comparación validación → prueba"):
+                    st.dataframe(tm.style.format({"MAE": "{:.2f}", "RMSE": "{:.2f}", "MASE": "{:.3f}",
+                                                  "Mejora MAE vs. persistencia (%)": "{:+.2f} %",
+                                                  "Mejora RMSE vs. persistencia (%)": "{:+.2f} %"}),
+                                 hide_index=True, use_container_width=True)
+                    gap = pd.DataFrame({
+                        "Métrica": ["MAE", "RMSE", "MASE"],
+                        "Validación": [sel["val_mae"], sel["val_rmse"], sel["val_mase"]],
+                        "Prueba": [rnn_test["MAE"], rnn_test["RMSE"], rnn_test["MASE"]],
+                    })
+                    gap["Cambio (%)"] = (gap["Prueba"] / gap["Validación"] - 1) * 100
+                    st.dataframe(gap.style.format({"Validación": "{:.2f}", "Prueba": "{:.2f}",
+                                                   "Cambio (%)": "{:+.1f} %"}),
+                                 hide_index=True, use_container_width=True)
+                    st.caption("Las predicciones completas quedan en `results/test_predictions.csv` para el "
+                               "análisis de error por hora de la Parte 5.")
