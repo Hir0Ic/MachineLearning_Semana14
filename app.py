@@ -12,6 +12,7 @@ from config import (
     DIAGRAM_PATH,
     FEATURES,
     HIDDEN_SIZES,
+    RESULTS_DIR,
     SEED,
     TARGET,
     TRAIN_FRAC,
@@ -33,6 +34,8 @@ from preprocessing import (TemporalMinMaxScaler, create_sliding_windows,
                            split_dataframe, temporal_split_indices)
 from train import TrainConfig, build_hyperparameter_grid, training_config_table
 import evaluate as ev
+import error_analysis as ea
+import demo as dm
 
 st.set_page_config(page_title="RNN · Bike Sharing", page_icon="🚲", layout="wide")
 set_seeds(SEED)
@@ -53,12 +56,13 @@ df, I_TR, I_VA = get_dataset()
 st.title("Pronóstico horario de alquiler de bicicletas con una RNN simple")
 st.caption("Sistemas Inteligentes y Machine Learning · UPN · Grupo 03")
 
-# Pestañas principales por integrante (Partes 1 a 4)
+# Pestañas principales por integrante (Partes 1 a 5)
 tabs = st.tabs([
     "📘 PARTE 1: Problema, Fundamentos y Datos",
     "📊 PARTE 2: Entradas, EDA y Preprocesamiento",
     "🧠 PARTE 3: Baselines y Arquitectura RNN",
     "🧪 PARTE 4: Experimentos y Resultados",
+    "🚀 PARTE 5: Demo e Interpretación",
 ])
 
 # ====================================================================================
@@ -1082,3 +1086,224 @@ with tabs[3]:
                                  hide_index=True, use_container_width=True)
                     st.caption("Las predicciones completas quedan en `results/test_predictions.csv` para el "
                                "análisis de error por hora de la Parte 5.")
+
+
+# ====================================================================================
+# TAB 5: PARTE 5
+# ====================================================================================
+with tabs[4]:
+    st.header("PARTE 5: Demo e Interpretación Operativa")
+
+    if not (RESULTS_DIR / "test_predictions.csv").exists():
+        st.warning("Aún no existen predicciones de prueba en `results/test_predictions.csv`. Ejecuta primero `python evaluate.py`.")
+    else:
+        test_df = ea.load_test_predictions()
+
+        sub5 = st.tabs([
+            "① Error por hora y días pico (5.5)",
+            "② Demo interactiva y alertas climáticas (7)",
+            "③ Discusión y conclusiones finales (6, 8, 9)",
+        ])
+
+        # ------------------------------------------------------------- Sub-tab 1: 5.5 Error por hora y picos
+        with sub5[0]:
+            st.subheader("5.5 Error por Hora del Día y Días de Mayor Demanda")
+            st.markdown(
+                "Se analizó el error de predicción durante las 2,607 horas del periodo de prueba para "
+                "identificar en qué momentos la RNN obtiene mejores resultados y cuáles son los periodos más difíciles de predecir."
+            )
+
+            # 1. Error horario
+            hourly_metrics = ea.compute_hourly_metrics(test_df)
+            st.markdown("#### Error promedio (MAE) según la hora del día (0 a 23)")
+            fig_h = ea.fig_hourly_error(hourly_metrics)
+            _show(fig_h)
+
+            c_h1, c_h2, c_h3 = st.columns(3)
+            pico_8 = hourly_metrics[hourly_metrics["hr"] == 8].iloc[0]
+            pico_17 = hourly_metrics[hourly_metrics["hr"] == 17].iloc[0]
+            valle_4 = hourly_metrics[hourly_metrics["hr"] == 4].iloc[0]
+
+            with c_h1.container(border=True):
+                st.markdown("**Hora Punta Mañana (08:00)**")
+                st.metric("MAE RNN", f"{pico_8['mae_rnn']:.1f}", f"Persist: {pico_8['mae_persist']:.1f}", delta_color="inverse")
+                st.caption(f"Mejora del {pico_8['mejora_vs_persist_%']:.1f} % frente al desfase de persistencia.")
+
+            with c_h2.container(border=True):
+                st.markdown("**Hora Punta Tarde (17:00)**")
+                st.metric("MAE RNN", f"{pico_17['mae_rnn']:.1f}", f"Persist: {pico_17['mae_persist']:.1f}", delta_color="inverse")
+                st.caption(f"Mejora del {pico_17['mejora_vs_persist_%']:.1f} % al anticipar el retorno laboral.")
+
+            with c_h3.container(border=True):
+                st.markdown("**Hora Valle Nocturna (04:00)**")
+                st.metric("MAE RNN", f"{valle_4['mae_rnn']:.1f}", f"Persist: {valle_4['mae_persist']:.1f}", delta_color="off")
+                st.caption("Baja demanda absoluta (~8 bicis/h); errores reducidos en ambas.")
+
+            st.divider()
+
+            # 2. Laboral vs Fin de semana
+            st.markdown("#### Comparación: Días Laborables vs. Fines de Semana y Feriados")
+            lab_df, nolab_df = ea.compute_workingday_hourly_metrics(test_df)
+            fig_lab = ea.fig_hourly_by_workingday(lab_df, nolab_df)
+            _show(fig_lab)
+
+            st.info(
+                "💡 **Hallazgo clave:** En días laborables, la demanda sube bruscamente a las 08:00 y 17:00 h. "
+                "La persistencia falla porque siempre llega con una hora de retraso (>200 bicis/h de error). "
+                "En cambio, la RNN anticipa estos picos gracias a las variables de hora y día, reduciendo el error en más del 60%. "
+                "Los fines de semana la demanda es más suave y concentrada al mediodía, lo que facilita predicciones aún más estables."
+            )
+
+            st.divider()
+
+            # 3. Días de mayor demanda (Picos)
+            st.markdown("#### Evaluación en los Días de Mayor Demanda Acumulada")
+            top_days, comp_summary = ea.compute_peak_days(test_df, top_n=5)
+
+            col_p1, col_p2 = st.columns([1, 1])
+            with col_p1:
+                st.markdown("**Top 5 Días de Mayor Demanda en Prueba:**")
+                st.dataframe(
+                    top_days[["date", "dia_semana", "demanda_total", "demanda_media", "pico_max", "mae_rnn", "mae_persist", "mejora_vs_persist_%"]].style.format({
+                        "demanda_total": "{:,.0f}",
+                        "demanda_media": "{:.1f}",
+                        "pico_max": "{:,.0f}",
+                        "mae_rnn": "{:.1f}",
+                        "mae_persist": "{:.1f}",
+                        "mejora_vs_persist_%": "{:+.1f} %",
+                    }),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+            with col_p2:
+                st.markdown("**Comparación: Días Pico vs. Resto de Días:**")
+                st.dataframe(
+                    comp_summary.style.format({
+                        "Demanda media horaria": "{:.1f}",
+                        "MAE RNN": "{:.1f}",
+                        "MAE Persistencia": "{:.1f}",
+                        "Mejora RNN (%)": "{:+.1f} %",
+                    }),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                st.caption("Aunque el MAE absoluto aumenta en días de alta demanda por mayor volumen, la reducción porcentual del error lograda por la RNN se mantiene sobre el 58 %.")
+
+            st.divider()
+
+            # 4. Sensibilidad al clima
+            st.markdown("#### Sensibilidad del Error frente a Condiciones Meteorológicas (`weathersit`)")
+            weather_impact = ea.compute_weather_impact(test_df)
+            col_w1, col_w2 = st.columns([1, 1])
+            with col_w1:
+                fig_w = ea.fig_weather_error(weather_impact)
+                _show(fig_w)
+            with col_w2:
+                st.dataframe(
+                    weather_impact[["Clima", "Horas", "Demanda media", "MAE RNN", "MAE Persistencia", "Mejora vs Persist (%)"]].style.format({
+                        "Demanda media": "{:.1f}",
+                        "MAE RNN": "{:.1f}",
+                        "MAE Persistencia": "{:.1f}",
+                        "Mejora vs Persist (%)": "{:+.1f} %",
+                    }),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                st.caption("Con lluvia o nieve (Categoría 3), la demanda se contrae notablemente; la RNN adapta su pronóstico a la baja gracias a las covariables `temp`, `hum` y `windspeed`.")
+
+        # ------------------------------------------------------------- Sub-tab 2: Sección 7 Demo Interactiva
+        with sub5[1]:
+            st.subheader("7. Demostración Interactiva en Tiempo Real y Alertas Meteorológicas")
+            _howto(
+                "selecciona un instante histórico de prueba para simular la operación en tiempo real.",
+                "mueve el deslizador para elegir el momento t. El sistema toma el historial de las últimas 24 o 48 h (lo conocido hasta t), "
+                "predice la hora siguiente (t+1), la compara contra lo que ocurrió y emite alertas de gestión de flota según el clima."
+            )
+
+            col_d1, col_d2 = st.columns([1, 2])
+            with col_d1:
+                demo_L = st.radio("Ventana histórica observada:", [24, 48], index=0, horizontal=True, key="p5_demo_L")
+            with col_d2:
+                demo_idx = st.slider(
+                    "Instante de decisión t (muestra en tramo de prueba):",
+                    min_value=demo_L,
+                    max_value=len(test_df) - 1,
+                    value=min(120, len(test_df) - 1),
+                    key="p5_demo_idx",
+                )
+
+            hist_slice, target_row = dm.get_demo_slice(test_df, target_idx=demo_idx, window_hours=demo_L)
+            alert_info = dm.check_weather_alerts(target_row)
+
+            # Métricas en vivo de la predicción t+1
+            m_d1, m_d2, m_d3, m_d4 = st.columns(4)
+            y_real = float(target_row["y_true"])
+            y_rnn = float(target_row["rnn"])
+            y_per = float(target_row["persistencia"])
+            err_r = abs(y_real - y_rnn)
+            err_p = abs(y_real - y_per)
+
+            m_d1.metric("Hora a predecir (t+1)", f"{target_row['timestamp']:%Y-%m-%d %H:00}")
+            m_d2.metric("Pronóstico RNN ŷ(t+1)", f"{int(round(y_rnn))} bicis", f"Error: {err_r:.1f}", delta_color="inverse")
+            m_d3.metric("Demanda real y(t+1)", f"{int(y_real)} bicis")
+            m_d4.metric("Persistencia (referencia)", f"{int(y_per)} bicis", f"Error: {err_p:.1f}", delta_color="inverse")
+
+            # Panel de Alertas Meteorológicas Operativas
+            if alert_info["level"] == "critical":
+                for msg in alert_info["messages"]:
+                    st.error(msg)
+            elif alert_info["level"] == "warning":
+                for msg in alert_info["messages"]:
+                    st.warning(msg)
+            else:
+                for msg in alert_info["messages"]:
+                    st.success(msg)
+
+            # Gráfico de la demo
+            fig_demo = dm.fig_demo_timeline(hist_slice, target_row, window_hours=demo_L)
+            _show(fig_demo)
+
+            st.caption(
+                f"**Resumen del caso:** Para predecir {target_row['timestamp']:%Y-%m-%d %H:00}, la RNN se desvió en "
+                f"**{err_r:.1f} bicicletas**, mientras que la persistencia se desvió en **{err_p:.1f} bicicletas** "
+                f"({'evitando un error de ' + str(round(err_p - err_r, 1)) + ' bicis' if err_p > err_r else 'desempeño cercano'})."
+            )
+
+        # ------------------------------------------------------------- Sub-tab 3: Secciones 6 y 8 Discusión y Conclusiones
+        with sub5[2]:
+            st.subheader("6. Discusión Técnica, 8. Conclusiones y 9. Referencias")
+
+            c_disc1, c_disc2 = st.columns(2)
+            with c_disc1.container(border=True):
+                st.markdown("### 6. Discusión Técnica de Resultados")
+                st.markdown(
+                    "**1. Rendimiento de la RNN:** La red neuronal recurrente obtuvo mejores resultados que los otros modelos, "
+                    "reduciendo el error en un 61.8 % frente al modelo de persistencia y un 42.9 % frente a la regresión Ridge. "
+                    "Esto demuestra que puede identificar mejor los patrones de demanda de bicicletas.\n\n"
+                    "**2. Ventana temporal:** Se determinó que utilizar las últimas 24 horas ofrece mejores resultados. "
+                    "Con 12 horas falta información y con 48 horas el modelo presenta dificultades para procesar tantos datos.\n\n"
+                    "**3. Generalización:** El error de validación fue de 33.3 y el de prueba de 31.1. Al ser valores similares, "
+                    "se demuestra que el modelo aprendió correctamente y evita el sobreajuste."
+                )
+
+            with c_disc2.container(border=True):
+                st.markdown("### 8. Limitaciones Operativas y Conclusiones")
+                st.markdown(
+                    "**Limitaciones del modelo:**\n\n"
+                    "- **Predicción a corto plazo:** Solo predice la demanda de la siguiente hora.\n"
+                    "- **Eventos inesperados:** Tiene dificultades para anticipar fenómenos extremos que alteran la demanda.\n"
+                    "- **Arquitectura básica:** Se podrían utilizar modelos LSTM o GRU para analizar secuencias más largas.\n\n"
+                    "**Conclusión principal:**\n\n"
+                    "La RNN demostró ser una buena alternativa para predecir la demanda de bicicletas, con un error promedio "
+                    "de aproximadamente 31 bicicletas. Esto permite mejorar la distribución de unidades entre estaciones y "
+                    "facilitar la planificación de los recursos."
+                )
+
+            st.divider()
+            st.markdown("### 9. Referencias Bibliográficas")
+            st.markdown(
+                "- Fanaee-T, H., & Gama, J. (2014). *Event labeling combining ensemble detectors and background knowledge*. Progress in Artificial Intelligence, 2(2), 113-127. DOI: 10.1007/s13748-013-0040-3.\n"
+                "- Elman, J. L. (1990). *Finding structure in time*. Cognitive Science, 14(2), 179-211.\n"
+                "- Goodfellow, I., Bengio, Y., & Courville, A. (2016). *Deep Learning*. MIT Press.\n"
+                "- Hyndman, R. J., & Athanasopoulos, G. (2018). *Forecasting: principles and practice*. OTexts."
+            )
