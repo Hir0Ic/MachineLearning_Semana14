@@ -3,14 +3,35 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+import torch
 
-from config import DIAGRAM_PATH, FEATURES, SEED, TARGET, TRAIN_FRAC, VAL_FRAC, set_seeds
+from baselines import evaluate_baselines
+from config import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_SEASONAL_DAYS,
+    DIAGRAM_PATH,
+    FEATURES,
+    HIDDEN_SIZES,
+    SEED,
+    TARGET,
+    TRAIN_FRAC,
+    VAL_FRAC,
+    WINDOW_SIZES,
+    set_seeds,
+)
 from data import VARIABLES, load_hour
 from features import EXCLUDED_LEAKAGE, EXCLUDED_REDUNDANT, add_cyclic_features
 from metrics import (mae, mae_naive_train, mase, persistence_forecast,
                      rmse, rnn_param_count, same_hour_mean_forecast)
+from model import (
+    SimpleRNNForecaster,
+    architecture_table,
+    count_parameters,
+    parameter_breakdown,
+)
 from preprocessing import (TemporalMinMaxScaler, create_sliding_windows,
                            split_dataframe, temporal_split_indices)
+from train import TrainConfig, build_hyperparameter_grid, training_config_table
 
 st.set_page_config(page_title="RNN · Bike Sharing", page_icon="🚲", layout="wide")
 set_seeds(SEED)
@@ -31,10 +52,11 @@ df, I_TR, I_VA = get_dataset()
 st.title("Pronóstico horario de alquiler de bicicletas con una RNN simple")
 st.caption("Sistemas Inteligentes y Machine Learning · UPN · Grupo 03")
 
-# Solo dos pestañas principales limpias
+# Pestañas principales por integrante (Partes 1, 2 y 3)
 tabs = st.tabs([
-    "📘 PARTE 1: Problema, Fundamentos y Datos (Del 1 al 3.2)",
-    "📊 PARTE 2: Entradas, EDA y Preprocesamiento (Del 3.3 al 4.2)"
+    "📘 PARTE 1: Problema, Fundamentos y Datos",
+    "📊 PARTE 2: Entradas, EDA y Preprocesamiento",
+    "🧠 PARTE 3: Baselines y Arquitectura RNN",
 ])
 
 # ====================================================================================
@@ -396,3 +418,287 @@ with tabs[1]:
     sample_win = pd.DataFrame(X_train_win[0], columns=FEATURES)
     st.dataframe(sample_win.head(6), use_container_width=True)
     st.caption(f"Salida correspondiente a predecir $y_0 = \\text{{cnt}}(t+1)$: **{int(y_train_win[0])}** bicicletas.")
+
+
+# ====================================================================================
+# TAB 3: PARTE 3
+# ====================================================================================
+with tabs[2]:
+    st.header("PARTE 3: Modelos de Referencia (Baselines) y Diseño de la RNN")
+
+    # ------------------------------------------------------------- 4.3 Baselines en validación
+    st.subheader("4.3 Modelos de Referencia: Persistencia y Promedio Estacional en Validación")
+    st.markdown(
+        "Antes de entrenar la red recurrente se establecen **líneas base estrictamente causales** "
+        "(usan solo observaciones $\\le t$) evaluadas sobre el **conjunto de validación (15 %, "
+        f"{I_VA - I_TR:,} horas)**. El conjunto de prueba permanece reservado y no se consulta en esta etapa."
+    )
+
+    col_b1, col_b2 = st.columns([2, 1])
+    seasonal_k = col_b1.select_slider(
+        "Días recientes (k) para el promedio estacional (misma hora):",
+        options=[1, 3, 7, 14],
+        value=DEFAULT_SEASONAL_DAYS,
+        key="p3_k",
+        help="Con k=1 corresponde a la misma hora del día anterior: cnt(t+1-24). Con k=7 promedia los últimos 7 días.",
+    )
+    show_ridge = col_b2.checkbox(
+        "Incluir Baseline C opcional (Regresión Ridge sobre rezagos)",
+        value=True,
+        key="p3_ridge",
+    )
+
+    base_table, base_preds, y_val_true, val_ts = evaluate_baselines(
+        df,
+        split="val",
+        seasonal_days=seasonal_k,
+        include_lag_reg=show_ridge,
+        train_frac=TRAIN_FRAC,
+        val_frac=VAL_FRAC,
+    )
+
+    st.dataframe(
+        base_table.style.format(
+            {
+                "MAE": "{:.2f}",
+                "RMSE": "{:.2f}",
+                "MASE": "{:.3f}",
+                "Mejora MAE vs. Persistencia (%)": "{:+.2f} %",
+            }
+        ),
+        hide_index=True,
+        use_container_width=True,
+    )
+    st.caption(
+        f"MASE calculado respecto al MAE ingenuo de persistencia en entrenamiento "
+        f"(`MAE_ingenuo = {mae_naive_train(df['cnt'].iloc[:I_TR]):.2f}` bicicletas/hora). "
+        "Un MASE < 1 indica mejora sobre la persistencia de entrenamiento."
+    )
+
+    # Gráfica comparativa en una semana del tramo de validación
+    st.markdown("**Comparación visual en una semana del tramo de validación (168 horas):**")
+    max_start = max(0, len(y_val_true) - 168)
+    week_start = st.slider(
+        "Inicio de la ventana semanal dentro de validación (hora relativa):",
+        min_value=0,
+        max_value=max_start,
+        value=min(240, max_start),
+        step=24,
+        key="p3_week",
+    )
+    sl = slice(week_start, week_start + 168)
+
+    fig_b, ax_b = plt.subplots(figsize=(12, 4.0))
+    ax_b.plot(val_ts.iloc[sl], y_val_true[sl], label="Real cnt(t+1)", color="#1F2A44", lw=2.0)
+    ax_b.plot(
+        val_ts.iloc[sl],
+        base_preds["A. Persistencia: cnt(t)"][sl],
+        label="A. Persistencia: cnt(t)",
+        color=ORANGE,
+        lw=1.3,
+        linestyle="--",
+        alpha=0.85,
+    )
+    seasonal_key = f"B. Promedio estacional (k={seasonal_k} días)"
+    ax_b.plot(
+        val_ts.iloc[sl],
+        base_preds[seasonal_key][sl],
+        label=seasonal_key,
+        color=GREEN,
+        lw=1.5,
+        alpha=0.9,
+    )
+    if show_ridge and "C. Regresión Ridge sobre rezagos (opcional)" in base_preds:
+        ax_b.plot(
+            val_ts.iloc[sl],
+            base_preds["C. Regresión Ridge sobre rezagos (opcional)"][sl],
+            label="C. Regresión Ridge (rezagos)",
+            color=BLUE,
+            lw=1.4,
+            linestyle="-.",
+            alpha=0.85,
+        )
+    ax_b.set_xlabel("Fecha y hora (validación)")
+    ax_b.set_ylabel("Alquileres horarios (cnt)")
+    ax_b.set_title("Comportamiento de las líneas base en validación (tramo de 7 días)")
+    ax_b.legend(loc="upper right")
+    ax_b.grid(True, linestyle=":", alpha=0.5)
+    fig_b.autofmt_xdate()
+    fig_b.tight_layout()
+    st.pyplot(fig_b)
+    plt.close(fig_b)
+
+    st.info(
+        "💡 **Observación operativa:** La persistencia arrastra un desfase de 1 hora en subidas y bajadas "
+        "bruscas (picos de 08:00 y 17:00), mientras que el promedio estacional captura el ciclo diario de "
+        "24 horas pero suaviza variaciones por clima o cambio de día laborable a fin de semana."
+    )
+
+    st.divider()
+
+    # ------------------------------------------------------------- 4.4 Diseño de la arquitectura
+    st.subheader("4.4 Diseño de la Arquitectura: RNN con Selector de H y Conteo de Parámetros")
+    st.markdown(
+        "A partir del esquema general de la Sección 2.5, aquí se concretan los tensores y el número exacto "
+        "de parámetros entrenables instanciando el módulo real `SimpleRNNForecaster` (`model.py`) en PyTorch."
+    )
+
+    c_a1, c_a2, c_a3, c_a4 = st.columns(4)
+    p3_L = c_a1.select_slider("Ventana L (horas)", WINDOW_SIZES, value=24, key="p3_L")
+    p3_H = c_a2.select_slider("Unidades ocultas H", HIDDEN_SIZES, value=32, key="p3_H")
+    p3_layers = c_a3.select_slider("Capas recurrentes", [1, 2], value=1, key="p3_layers")
+    p3_B = c_a4.select_slider("Batch B (ejemplo)", [32, 64, 128], value=DEFAULT_BATCH_SIZE, key="p3_B")
+
+    F_dim = len(FEATURES)
+    rnn_net = SimpleRNNForecaster(input_size=F_dim, hidden_size=p3_H, num_layers=p3_layers)
+    n_params_torch = count_parameters(rnn_net)
+    n_params_formula = rnn_param_count(F_dim, p3_H, p3_layers)
+    with torch.no_grad():
+        dummy_out = rnn_net(torch.zeros((p3_B, p3_L, F_dim), dtype=torch.float32))
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Tensor de entrada X", f"({p3_B}, {p3_L}, {F_dim})")
+    m2.metric("Estado final h_t", f"({p3_B}, {p3_H})")
+    m3.metric("Tensor de salida ŷ", str(tuple(dummy_out.shape)))
+    m4.metric(
+        "Parámetros entrenables",
+        f"{n_params_torch:,}",
+        "Coincide con fórmula" if n_params_torch == n_params_formula else "Revisar",
+    )
+
+    col_t7, col_bar = st.columns([3, 2])
+    with col_t7:
+        st.markdown("**Tabla 7 · Capas concretas de la arquitectura RNN (Many-to-One):**")
+        arch_df = architecture_table(
+            input_size=F_dim,
+            seq_len=p3_L,
+            hidden_size=p3_H,
+            num_layers=p3_layers,
+            batch_size=p3_B,
+        )
+        st.dataframe(arch_df, hide_index=True, use_container_width=True)
+        with st.expander("Ver desglose por tensor de pesos y sesgos en PyTorch"):
+            st.dataframe(
+                pd.DataFrame(parameter_breakdown(F_dim, p3_H, p3_layers)),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+    with col_bar:
+        st.markdown("**Crecimiento cuadrático de parámetros ($\\mathcal{O}(H^2)$):**")
+        p_1layer = [rnn_param_count(F_dim, h, 1) for h in HIDDEN_SIZES]
+        p_2layer = [rnn_param_count(F_dim, h, 2) for h in HIDDEN_SIZES]
+        x_pos = np.arange(len(HIDDEN_SIZES))
+        width = 0.35
+        fig_p, ax_p = plt.subplots(figsize=(5.5, 3.6))
+        b1 = ax_p.bar(x_pos - width / 2, p_1layer, width, label="1 capa recurrente", color=BLUE)
+        b2 = ax_p.bar(x_pos + width / 2, p_2layer, width, label="2 capas recurrentes", color=ORANGE)
+        ax_p.set_xticks(x_pos)
+        ax_p.set_xticklabels([f"H = {h}" for h in HIDDEN_SIZES])
+        ax_p.set_ylabel("Parámetros entrenables")
+        ax_p.set_title(f"Complejidad del modelo (F = {F_dim})")
+        ax_p.legend()
+        ax_p.grid(axis="y", linestyle="--", alpha=0.5)
+        for bars in (b1, b2):
+            for bar in bars:
+                val = int(bar.get_height())
+                ax_p.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    val + 120,
+                    f"{val:,}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
+        fig_p.tight_layout()
+        st.pyplot(fig_p)
+        plt.close(fig_p)
+        st.caption(
+            "Los parámetros dependen de F y H, no de L: la recurrencia reutiliza (W, U, b) en todos los pasos."
+        )
+
+    st.divider()
+
+    # ------------------------------------------------------------- 4.5 Configuración de aprendizaje
+    st.subheader("4.5 Configuración de Aprendizaje: MSE, Adam, Batch, Clipping y Semilla")
+    cfg_default = TrainConfig()
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Pérdida", "MSE")
+    k2.metric("Optimizador", f"Adam (lr={cfg_default.lr:g})")
+    k3.metric("Batch size", f"{cfg_default.batch_size}")
+    k4.metric("Gradient clipping", f"L2 ≤ {cfg_default.grad_clip}")
+    k5.metric("Semilla fija", f"SEED = {cfg_default.seed}")
+
+    st.dataframe(training_config_table(cfg_default), hide_index=True, use_container_width=True)
+    st.caption(
+        "El bucle reproducible está implementado en `train.py` (`train_rnn`). Según la división del equipo, "
+        "la Parte 4 (`experiments.py`) ejecuta el entrenamiento fuera de la app y almacena en `results/` "
+        "el mejor modelo, el escalador ajustado y las predicciones."
+    )
+
+    st.divider()
+
+    # ------------------------------------------------------------- 4.6 Plan de hiperparámetros
+    st.subheader("4.6 Plan de Hiperparámetros: Rejilla 3×3 de Combinaciones a Probar")
+    st.markdown(
+        "Se evalúa la rejilla completa de **9 combinaciones** ($L \\in \\{12, 24, 48\\}$ horas $\\times$ "
+        "$H \\in \\{16, 32, 64\\}$ unidades ocultas) manteniendo constantes: los datos ($F=8$), la partición "
+        "cronológica (70/15/15), el escalador ajustado solo en entrenamiento, la configuración de la Tabla 8 "
+        "y el criterio de selección (menor **MAE / RMSE en validación**)."
+    )
+
+    grid_layers = st.radio(
+        "Capas recurrentes para proyectar la rejilla:",
+        options=[1, 2],
+        horizontal=True,
+        index=0,
+        key="p3_grid_layers",
+    )
+    grid_df = build_hyperparameter_grid(
+        window_sizes=WINDOW_SIZES,
+        hidden_sizes=HIDDEN_SIZES,
+        input_size=F_dim,
+        num_layers=grid_layers,
+        n_train=I_TR,
+    )
+    st.dataframe(grid_df, hide_index=True, use_container_width=True)
+
+    # Matriz visual 3x3 de combinaciones (L x H) en formato compacto centrado
+    pivot_params = grid_df.pivot(index="Ventana L (h)", columns="Hidden H", values="Parámetros")
+    pivot_ids = grid_df.pivot(index="Ventana L (h)", columns="Hidden H", values="ID")
+    fig_g, ax_g = plt.subplots(figsize=(5.0, 2.5))
+    im_g = ax_g.imshow(pivot_params.to_numpy(), cmap="Blues", aspect="auto")
+    ax_g.set_xticks(range(len(pivot_params.columns)))
+    ax_g.set_xticklabels([f"H = {h}" for h in pivot_params.columns], fontsize=9)
+    ax_g.set_yticks(range(len(pivot_params.index)))
+    ax_g.set_yticklabels([f"L = {l} h" for l in pivot_params.index], fontsize=9)
+    ax_g.set_title("Mapa de la rejilla 3×3 (ID y parámetros entrenables)", fontsize=10)
+    max_p = pivot_params.to_numpy().max()
+    for r_idx in range(pivot_params.shape[0]):
+        for c_idx in range(pivot_params.shape[1]):
+            val = int(pivot_params.iloc[r_idx, c_idx])
+            cid = pivot_ids.iloc[r_idx, c_idx]
+            color_txt = "white" if val > max_p * 0.6 else "#1F2A44"
+            ax_g.text(
+                c_idx,
+                r_idx,
+                f"{cid}\n{val:,} params",
+                ha="center",
+                va="center",
+                color=color_txt,
+                fontweight="bold",
+                fontsize=8.5,
+            )
+    cbar = fig_g.colorbar(im_g, ax=ax_g, label="Parámetros")
+    cbar.ax.tick_params(labelsize=8)
+    fig_g.tight_layout()
+    _, col_map, _ = st.columns([1.2, 2.0, 1.2])
+    with col_map:
+        st.pyplot(fig_g, use_container_width=True)
+    plt.close(fig_g)
+
+    st.success(
+        "✅ **Criterios fijos para la Parte 4:** Todas las configuraciones C1–C9 se comparan sobre las mismas "
+        f"{I_VA - I_TR:,} horas de validación usando `train.py` con semilla `{SEED}`. Las columnas de tiempo, "
+        "MAE val. y RMSE val. se completan en la ejecución experimental de la Parte 4 (`experiments.py`)."
+    )
